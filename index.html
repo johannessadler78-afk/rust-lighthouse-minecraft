@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rust Lighthouse – 3D-Bauplan für Minecraft</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;overflow:hidden;font-family:system-ui,Segoe UI,Arial,sans-serif;background:#0d1117;color:#e6edf3}
+  #view{position:fixed;inset:0}
+  .panel{position:fixed;background:rgba(13,17,23,.88);border:1px solid #30363d;border-radius:10px;padding:12px 14px;backdrop-filter:blur(6px)}
+  #left{top:12px;left:12px;width:310px;max-height:calc(100vh - 24px);overflow:auto}
+  #right{top:12px;right:12px;width:470px}
+  h1{font-size:17px;margin:0 0 2px}
+  h2{font-size:13px;margin:12px 0 6px;color:#8b949e;text-transform:uppercase;letter-spacing:.05em}
+  .sub{font-size:12px;color:#8b949e;margin-bottom:8px}
+  .modes{display:flex;gap:6px}
+  button{flex:1;background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:7px 6px;cursor:pointer;font-size:13px}
+  button.on{background:#b62324;border-color:#f85149}
+  button:hover{border-color:#8b949e}
+  #ylabel{font-size:26px;font-weight:700;text-align:center;margin:6px 0 2px}
+  #ylabel small{font-size:12px;color:#8b949e;font-weight:400}
+  input[type=range]{width:100%}
+  .row{display:flex;gap:6px;align-items:center;font-size:13px;margin:4px 0}
+  #note{font-size:13px;background:#161b22;border-left:3px solid #f85149;padding:6px 8px;border-radius:4px;min-height:34px}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  td{padding:2px 4px;border-bottom:1px solid #21262d}
+  td.n{text-align:right;font-variant-numeric:tabular-nums}
+  .sw{display:inline-block;width:12px;height:12px;border-radius:2px;margin-right:6px;vertical-align:-2px;border:1px solid #0006}
+  #grid{width:100%;image-rendering:pixelated;background:#0b0f14;border-radius:6px;cursor:crosshair}
+  #hover{font-size:12px;color:#8b949e;height:16px;margin-top:4px}
+  #help{position:fixed;bottom:12px;left:50%;transform:translateX(-50%);font-size:12px;color:#c9d1d9;background:rgba(13,17,23,.8);padding:6px 12px;border-radius:6px;border:1px solid #30363d;white-space:nowrap}
+  #cross{position:fixed;left:50%;top:50%;width:14px;height:14px;margin:-7px;display:none;pointer-events:none}
+  #cross:before,#cross:after{content:"";position:absolute;background:#fff}
+  #cross:before{left:6px;top:0;width:2px;height:14px}#cross:after{top:6px;left:0;width:14px;height:2px}
+  #pos{position:fixed;top:12px;left:50%;transform:translateX(-50%);font:13px monospace;background:rgba(0,0,0,.6);padding:4px 10px;border-radius:5px;display:none}
+  .hide{display:none!important}
+</style>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}
+</script>
+</head>
+<body>
+<div id="view"></div>
+<div id="cross"></div>
+<div id="pos"></div>
+
+<div id="left" class="panel">
+  <h1>🗼 Rust Lighthouse</h1>
+  <div class="sub">3D-Bauplan · Mitte Turm = X0 Z0 · Osten = +X · Norden = −Z</div>
+  <div class="modes">
+    <button id="mOver" class="on">Übersicht</button>
+    <button id="mLayer">Schichten</button>
+    <button id="mWalk">Begehen</button>
+  </div>
+
+  <div id="layerBox" class="hide">
+    <div id="ylabel">Y = 0</div>
+    <input id="ySlider" type="range" min="-7" max="37" step="1" value="0">
+    <div class="row"><button id="yDown">▼ Schicht</button><button id="yUp">Schicht ▲</button></div>
+    <label class="row"><input type="checkbox" id="onlyLayer"> nur aktuelle Schicht zeigen</label>
+    <div id="note"></div>
+  </div>
+
+  <h2 id="matTitle">Material gesamt</h2>
+  <table id="mats"></table>
+  <div class="sub" style="margin-top:8px">Stacks = Anzahl / 64 (aufgerundet)</div>
+</div>
+
+<div id="right" class="panel hide">
+  <h2 style="margin-top:0">Draufsicht Schicht <span id="gy"></span> (1 Feld = 1 Block)</h2>
+  <canvas id="grid" width="940" height="860"></canvas>
+  <div id="hover">Maus über ein Feld bewegen …</div>
+</div>
+
+<div id="help">Maus links: drehen · rechts: verschieben · Rad: zoomen</div>
+
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+import {PointerLockControls} from 'three/addons/controls/PointerLockControls.js';
+import {mergeGeometries} from 'three/addons/utils/BufferGeometryUtils.js';
+
+/* ================= MATERIALIEN ================= */
+const M = {
+  white:   {n:'White Concrete',        c:'#e9ecec', s:'box'},
+  red:     {n:'Red Concrete',          c:'#8e2121', s:'box'},
+  whiteSt: {n:'White Concrete Stairs*',c:'#dfe3e3', s:'stair'},
+  redSt:   {n:'Red Concrete Stairs*',  c:'#7f1d1d', s:'stair'},
+  sbrick:  {n:'Stone Bricks',          c:'#7a7a7a', s:'box'},
+  cbrick:  {n:'Cracked Stone Bricks',  c:'#6c6c6c', s:'box'},
+  gray:    {n:'Gray Concrete',         c:'#3e4246', s:'box'},
+  smooth:  {n:'Smooth Stone',          c:'#a0a0a0', s:'box'},
+  sslab:   {n:'Smooth Stone Slab (oben)',c:'#a8a8a8', s:'slabTop'},
+  bslab:   {n:'Stone Brick Slab',      c:'#7f7f7f', s:'slab'},
+  stair:   {n:'Stone Brick Stairs',    c:'#858585', s:'stair'},
+  pandes:  {n:'Polished Andesite',     c:'#848786', s:'box'},
+  stone:   {n:'Stone',                 c:'#6f6f6f', s:'box'},
+  andes:   {n:'Andesite',              c:'#888a8a', s:'box'},
+  cobble:  {n:'Cobblestone',           c:'#5d5d5d', s:'box'},
+  mossy:   {n:'Mossy Cobblestone',     c:'#5a6b45', s:'box'},
+  gravel:  {n:'Gravel',                c:'#857f7c', s:'box'},
+  planks:  {n:'Spruce Planks',         c:'#6b4f2f', s:'box'},
+  bars:    {n:'Iron Bars',             c:'#55595c', s:'bars'},
+  iron:    {n:'Iron Block',            c:'#d8d8d8', s:'box'},
+  beacon:  {n:'Beacon',                c:'#7ff3ef', s:'box', glow:true},
+  glass:   {n:'Glass Pane',            c:'#a8d8f0', s:'pane', tr:.45},
+  door:    {n:'Iron Door',             c:'#c4c4c4', s:'pane', walk:true},
+  ladder:  {n:'Ladder',                c:'#9a7440', s:'ladder', walk:true},
+  trap:    {n:'Trapdoor',              c:'#8a6a3a', s:'trap', walk:true},
+  lantern: {n:'Lantern',               c:'#ffcf6b', s:'small', glow:true, walk:true},
+  rod:     {n:'Lightning Rod',         c:'#c46a3c', s:'rod'},
+  barrel:  {n:'Barrel',                c:'#7a5a33', s:'box'},
+  chest:   {n:'Chest',                 c:'#a0722e', s:'small'},
+};
+
+/* ================= SCHABLONEN ================= */
+const T = {
+ D11:['...#####...','..##...##..','.##.....##.','##.......##','#.........#','#.........#','#.........#','##.......##','.##.....##.','..##...##..','...#####...'],
+ D9:['..#####..','.##...##.','##.....##','#.......#','#.......#','#.......#','##.....##','.##...##.','..#####..'],
+ D7:['..###..','.##.##.','##...##','#.....#','##...##','.##.##.','..###..'],
+ D5:['.###.','#...#','#...#','#...#','.###.'],
+ D13:['....#####....','..###...###..','.##.......##.','.#.........#.','##.........##','#...........#','#...........#','#...........#','##.........##','.#.........#.','.##.......##.','..###...###..','....#####....'],
+};
+function ring(t){const r=[],h=(t.length-1)/2;t.forEach((row,i)=>[...row].forEach((ch,j)=>{if(ch==='#')r.push([j-h,i-h])}));return r}
+function full(t){const r=[],h=(t.length-1)/2;t.forEach((row,i)=>{const a=row.indexOf('#'),b=row.lastIndexOf('#');for(let j=a;j<=b;j++)r.push([j-h,i-h])});return r}
+const inSet=(list)=>new Set(list.map(([x,z])=>x+','+z));
+
+/* ================= WELT ================= */
+const B=new Map();
+const K=(x,y,z)=>x+','+y+','+z;
+const set=(x,y,z,m)=>B.set(K(x,y,z),m);
+const del=(x,y,z)=>B.delete(K(x,y,z));
+const get=(x,y,z)=>B.get(K(x,y,z));
+let seed=1337;const rnd=()=>((seed=(seed*16807)%2147483647)/2147483647);
+
+/* --- Felseninsel: Oberfläche = Schicht Y=-1, man steht auf Y=0 --- */
+const islandLayers=[ // y, halbe Breite X, halbe Tiefe Z
+  [-7,22,18],[-6,22,18],[-5,21,17],[-4,19,15],[-3,17,13.5],[-2,15.5,12],[-1,14.5,10]];
+const ph=[...Array(12)].map(()=>rnd()*6.28);
+function islandMat(y,edge){
+  if(y<=-5) return rnd()<.5?'gravel':'andes';
+  if(y===-4&&edge) return 'mossy';
+  const r=rnd(); return r<.5?'stone':r<.75?'andes':r<.9?'cobble':'mossy';
+}
+for(const [y,a,b] of islandLayers){
+  const k=y+8;
+  for(let x=-20;x<=34;x++)for(let z=-22;z<=22;z++){
+    const dx=x-6.5, dz=z, th=Math.atan2(dz,dx);
+    const f=1+0.07*Math.sin(3*th+ph[0]+k*.15)+0.05*Math.sin(5*th+ph[1])+0.04*Math.sin(7*th+ph[2]+k*.3);
+    const d=Math.sqrt((dx/(a*f))**2+(dz/(b*f))**2);
+    if(d<=1) set(x,y,z,islandMat(y,d>.86));
+  }
+}
+// Pflaster rund um die Bauten auf dem Plateau
+for(const [x,z] of [...B.keys()].filter(k=>k.split(',')[1]==='-1').map(k=>k.split(',').map(Number)).map(([x,,z])=>[x,z])){
+  if(x>=-7&&x<=21&&Math.abs(z)<=8) set(x,-1,z,rnd()<.6?'stone':'andes');
+}
+// Felsbrocken am Rand
+for(const [x,z] of [[-7,-5],[-6,6],[19,-8],[21,6],[2,-9],[10,9]]){ if(get(x,-1,z)){set(x,0,z,'cobble'); if(rnd()<.5)set(x+1,0,z,'mossy');}}
+
+/* --- Anleger + Treppe (Süden) --- */
+for(let x=0;x<=2;x++){
+  for(let z=17;z<=20;z++) set(x,-4,z,'planks');
+  const steps=[[16,-3],[15,-2],[14,-1],[13,-1],[12,-1],[11,-1]];
+  for(const [z,y] of steps){ for(let yy=-7;yy<y;yy++) if(!get(x,yy,z)) set(x,yy,z,'cobble'); set(x,y,z, y===-1?'sbrick':'stair'); }
+}
+for(const z of [16,15,14]){ set(-1,-1,z,'cobble'); set(3,-1,z,'cobble'); for(let yy=-7;yy<-1;yy++){set(-1,yy,z,'cobble');set(3,yy,z,'cobble');} }
+
+/* --- Hauptturm --- */
+const D11=ring(T.D11),D9=ring(T.D9),D7=ring(T.D7),D5=ring(T.D5);
+const F11=full(T.D11),F9=full(T.D9),F7=full(T.D7);
+const colorAt=y=>(Math.floor(y/4)%2===0)?'white':'red';
+for(const [x,z] of F11) set(x,-1,z,'sbrick');
+for(let y=0;y<=29;y++){
+  const tpl = y<=11?D11 : y<=21?D9 : D7;
+  for(const [x,z] of tpl) set(x,y,z,colorAt(y));
+}
+// Verjüngung: Treppenring
+const s9=inSet(F9), s7=inSet(F7);
+for(const [x,z] of D11) if(!s9.has(x+','+z)) set(x,12,z, colorAt(12)==='red'?'redSt':'whiteSt');
+for(const [x,z] of D9)  if(!s7.has(x+','+z)) set(x,22,z, colorAt(22)==='red'?'redSt':'whiteSt');
+// Zwischenböden
+for(const [x,z] of F9) if(!get(x,11,z)) set(x,11,z,'smooth');
+for(const [x,z] of F7) if(!get(x,21,z)) set(x,21,z,'smooth');
+// Tür Süd
+set(0,0,5,'door'); set(0,1,5,'door');
+// Fenster
+for(const [x,z] of [[0,4],[0,-4],[4,0],[-4,0]]) for(const y of [17,18]) set(x,y,z,'glass');
+// Leitern (Nordwand)
+for(let y=0;y<=11;y++) set(0,y,-4,'ladder');
+for(let y=12;y<=21;y++) set(0,y,-3,'ladder');
+for(let y=22;y<=29;y++) set(0,y,-2,'ladder');
+// Licht innen
+for(const y of [2,14,24]) set(y<12?-3:-2, y, y<12?3:2,'lantern');
+
+/* --- Galerie + Laterne --- */
+for(const [x,z] of F11) set(x,30,z,'sslab');
+for(let x=-1;x<=1;x++)for(let z=-1;z<=1;z++) set(x,30,z,'iron');
+set(0,30,-2,'trap');
+for(const [x,z] of D11) set(x,31,z,'bars');
+for(let y=31;y<=34;y++) for(const [x,z] of D5) set(x,y,z,'bars');
+del(0,31,2); del(0,32,2); // Eingang Laterne
+set(0,31,0,'beacon');
+for(const [x,z] of D5) set(x,35,z,'bars');
+for(const [x,z] of [[1,0],[-1,0],[0,1],[0,-1]]){ set(x,35,z,'bars'); set(x,36,z,'bars'); }
+set(1,37,0,'rod'); set(-1,37,0,'rod');
+
+/* --- Bunker (Mitte X=14) --- */
+const BX=14, D13=ring(T.D13), F13=full(T.D13), s13=inSet(D13);
+for(const [x,z] of F13) set(BX+x,-1,z, s13.has(x+','+z)?'sbrick':'pandes');
+for(let y=0;y<=5;y++) for(const [x,z] of D13) set(BX+x,y,z, y===2?'gray':(rnd()<.15?'cbrick':'sbrick'));
+for(const [x,z] of F13) set(BX+x,6,z,'smooth');
+for(const [x,z] of D13) set(BX+x,7,z,'bars');
+for(const [x,z] of [[13,-6],[14,-6],[13,6],[14,6],[20,-1],[20,1]]) set(x,3,z,'bars'); // Fensterschlitze
+set(20,0,0,'door'); set(20,1,0,'door');                                             // Außentür Ost
+for(let y=0;y<=5;y++) set(19,y,1,'ladder'); set(19,6,1,'trap');                     // Dachzugang
+for(const [x,z,m] of [[16,-4,'barrel'],[17,-3,'barrel'],[16,4,'chest'],[11,-4,'chest'],[11,4,'barrel']]) set(x,0,z,m);
+set(14,0,-5,'lantern'); set(14,0,5,'lantern');
+
+/* --- Verbindungsgang X=6..7 --- */
+for(let x=6;x<=7;x++){
+  for(let z=-2;z<=2;z++){ set(x,-1,z,'sbrick'); set(x,4,z,'sbrick'); set(x,5,z,'bslab'); }
+  for(let y=0;y<=3;y++){ set(x,y,-2,'sbrick'); set(x,y,2,'sbrick'); }
+  for(let y=0;y<=3;y++) for(let z=-1;z<=1;z++) del(x,y,z);
+}
+for(let y=0;y<=2;y++) for(let z=-1;z<=1;z++){ del(5,y,z); del(8,y,z); }
+
+/* ================= SCHICHT-NOTIZEN ================= */
+function note(y){
+  if(y<=-5) return 'Insel-Unterbau unter Wasser: Gravel/Andesite, Rand ausfransen.';
+  if(y===-4) return 'Wasserlinie: Mossy Cobblestone am Rand. Anleger aus Spruce Planks (X0–2, Z17–20).';
+  if(y<=-2) return 'Insel-Flanken, Treppe Stone Brick Stairs (Süden, X0–2).';
+  if(y===-1) return 'Plateau-Oberfläche + Fundamente: Turm D11 voll, Bunker D13, Gang. Hier stehst du drauf.';
+  if(y===0)  return 'Turm D11 weiß, Tür Süd (0|5). Bunker D13, Tür Ost (20|0). Durchbrüche Gang.';
+  if(y<=2)   return y===2?'Bunker: Ring aus Gray Concrete (Band). Turm D11 weiß.':'Turm D11 weiß. Gang + Durchbrüche offen.';
+  if(y<=7)   return y===6?'Bunker-Flachdach (Smooth Stone voll). Turm D11 rot.':y===7?'Bunker-Brüstung Iron Bars. Turm D11 rot.':'Turm D11 '+(colorAt(y)==='red'?'rot':'weiß')+'. Gang-Decke Y4, Slabs Y5.';
+  if(y<=10)  return 'Turm D11 weiß.';
+  if(y===11) return 'Turm D11 weiß + Zwischenboden D9 voll (Smooth Stone), Leiterloch (0|−4).';
+  if(y===12) return 'Wechsel auf D9 (rot) – Treppenring auf dem freien D11-Rand.';
+  if(y<=15)  return 'Turm D9 rot.';
+  if(y<=19)  return (y===17||y===18)?'Turm D9 weiß – Fenster (Glass Pane) N/S/O/W.':'Turm D9 weiß.';
+  if(y===21) return 'Turm D9 rot + Zwischenboden D7 voll, Leiterloch (0|−3).';
+  if(y===22) return 'Wechsel auf D7 (rot) – Treppenring auf dem freien D9-Rand.';
+  if(y<=27)  return 'Turm D7 '+(colorAt(y)==='red'?'rot':'weiß')+'.';
+  if(y<=29)  return 'Laternensockel D7 rot.';
+  if(y===30) return 'Galerieboden D11 Smooth Stone Slab (oben), 3×3 Iron Blocks, Trapdoor (0|−2).';
+  if(y===31) return 'Geländer Iron Bars auf D11-Rand, Laterne D5 Bars, BEACON in der Mitte, Eingang Süd.';
+  if(y<=34)  return 'Laterne D5 Iron Bars (offen). Mitte frei.';
+  if(y===35) return 'Dachkranz D5 + Kreuz aus Bars. Mitte (0|0) FREI für den Strahl!';
+  if(y===36) return 'Spitze: 4 Bars um die Mitte, Mitte frei.';
+  return 'Zwei Lightning Rods auf (±1|0).';
+}
+
+/* ================= THREE.JS ================= */
+const view=document.getElementById('view');
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth,innerHeight);
+renderer.shadowMap.enabled=true;
+view.appendChild(renderer.domElement);
+const scene=new THREE.Scene();
+scene.background=new THREE.Color('#9cc7e8');
+scene.fog=new THREE.Fog('#9cc7e8',120,320);
+const camera=new THREE.PerspectiveCamera(60,innerWidth/innerHeight,0.05,1000);
+camera.position.set(-38,30,44);
+scene.add(new THREE.HemisphereLight('#dfefff','#40505a',0.9));
+const sun=new THREE.DirectionalLight('#fff4e0',1.6);
+sun.position.set(-40,70,30); sun.castShadow=true;
+sun.shadow.mapSize.set(2048,2048);
+Object.assign(sun.shadow.camera,{left:-50,right:50,top:50,bottom:-50,far:200});
+scene.add(sun);
+
+const water=new THREE.Mesh(new THREE.PlaneGeometry(600,600),new THREE.MeshPhongMaterial({color:'#2f6f9a',transparent:true,opacity:.7,shininess:80}));
+water.rotation.x=-Math.PI/2; water.position.y=-3.6; scene.add(water);
+const beam=new THREE.Mesh(new THREE.CylinderGeometry(.18,.18,200,8),new THREE.MeshBasicMaterial({color:'#bff',transparent:true,opacity:.45}));
+beam.position.set(0,31.5+100,0); scene.add(beam);
+
+const box=(w,h,d,ox=0,oy=0,oz=0)=>new THREE.BoxGeometry(w,h,d).translate(ox,oy,oz);
+const G={
+  box:box(1,1,1),
+  slab:box(1,.5,1,0,-.25,0),
+  slabTop:box(1,.5,1,0,.25,0),
+  stair:mergeGeometries([box(1,.5,1,0,-.25,0),box(1,.5,.5,0,.25,-.25)]),
+  bars:mergeGeometries([box(.12,1,1),box(1,1,.12)]),
+  pane:box(.9,1,.9),
+  ladder:box(.85,.95,.85),
+  trap:box(.95,.18,.95,0,.4,0),
+  small:box(.6,.6,.6,0,-.2,0),
+  rod:box(.15,1,.15),
+};
+const materials={};
+for(const [k,m] of Object.entries(M)){
+  materials[k]=new THREE.MeshLambertMaterial({color:m.c,transparent:!!m.tr||m.s==='ladder',opacity:m.tr||(m.s==='ladder'?.6:1),emissive:m.glow?m.c:'#000',emissiveIntensity:m.glow?.8:0});
+}
+
+const entries=[...B.entries()].map(([k,m])=>{const [x,y,z]=k.split(',').map(Number);return {x,y,z,m,t:.9+rnd()*.2}});
+let meshes=[];
+const mat4=new THREE.Matrix4(), col=new THREE.Color();
+function rebuild(maxY,dimBelow,only){
+  meshes.forEach(o=>{scene.remove(o);o.dispose();}); meshes=[];
+  const groups={};
+  for(const e of entries){
+    if(e.y>maxY) continue;
+    if(only&&e.y!==maxY) continue;
+    (groups[e.m]??=[]).push(e);
+  }
+  for(const [m,list] of Object.entries(groups)){
+    const im=new THREE.InstancedMesh(G[M[m].s],materials[m],list.length);
+    im.castShadow=im.receiveShadow=true;
+    list.forEach((e,i)=>{
+      mat4.makeTranslation(e.x,e.y,e.z); im.setMatrixAt(i,mat4);
+      const f=(dimBelow&&e.y<maxY)?.35*e.t:e.t; col.setRGB(f,f,f); im.setColorAt(i,col);
+    });
+    scene.add(im); meshes.push(im);
+  }
+  beam.visible=maxY>=31;
+}
+
+/* ================= MATERIALLISTE ================= */
+function matTable(y){
+  const c={};for(const e of entries){ if(y===null||e.y===y) c[e.m]=(c[e.m]||0)+1; }
+  const rows=Object.entries(c).sort((a,b)=>b[1]-a[1]);
+  document.getElementById('mats').innerHTML=rows.map(([m,n])=>
+    `<tr><td><span class="sw" style="background:${M[m].c}"></span>${M[m].n}</td><td class="n">${n}</td><td class="n">${Math.ceil(n/64)} St.</td></tr>`).join('')
+    +`<tr><td><b>Summe</b></td><td class="n"><b>${rows.reduce((s,r)=>s+r[1],0)}</b></td><td></td></tr>`;
+  document.getElementById('matTitle').textContent=y===null?'Material gesamt':'Material in Schicht Y='+y;
+}
+
+/* ================= 2D-DRAUFSICHT ================= */
+const cv=document.getElementById('grid'),cx=cv.getContext('2d');
+const X0=-21,X1=35,Z0=-23,Z1=23,CS=Math.floor(Math.min(cv.width/(X1-X0+1),cv.height/(Z1-Z0+1)));
+const OX=Math.floor((cv.width-(X1-X0+1)*CS)/2),OY=Math.floor((cv.height-(Z1-Z0+1)*CS)/2);
+let curY=0;
+function drawGrid(y){
+  cx.fillStyle='#0b0f14';cx.fillRect(0,0,cv.width,cv.height);
+  for(let x=X0;x<=X1;x++)for(let z=Z0;z<=Z1;z++){
+    const px=OX+(x-X0)*CS,py=OY+(z-Z0)*CS, m=get(x,y,z), below=get(x,y-1,z);
+    if(m){cx.fillStyle=M[m].c;cx.fillRect(px,py,CS,CS);
+      if(M[m].s==='bars'){cx.strokeStyle='#bbb';cx.beginPath();cx.moveTo(px+2,py+CS/2);cx.lineTo(px+CS-2,py+CS/2);cx.moveTo(px+CS/2,py+2);cx.lineTo(px+CS/2,py+CS-2);cx.stroke();}
+      if(M[m].s==='stair'){cx.fillStyle='#0005';cx.fillRect(px,py,CS,CS/2);}
+    } else if(below){cx.fillStyle='#ffffff10';cx.fillRect(px,py,CS,CS);}
+    cx.strokeStyle=(x%5===0||z%5===0)?'#ffffff30':'#ffffff10';cx.strokeRect(px+.5,py+.5,CS-1,CS-1);
+  }
+  // Achsen
+  cx.strokeStyle='#f85149';cx.lineWidth=2;
+  const ax=OX+(0-X0)*CS+CS/2, az=OY+(0-Z0)*CS+CS/2;
+  cx.beginPath();cx.moveTo(ax,OY);cx.lineTo(ax,OY+(Z1-Z0+1)*CS);cx.moveTo(OX,az);cx.lineTo(OX+(X1-X0+1)*CS,az);cx.stroke();cx.lineWidth=1;
+  cx.fillStyle='#c9d1d9';cx.font='bold 18px system-ui';
+  cx.fillText('N (−Z)',ax-28,OY+18); cx.fillText('O (+X)',cv.width-66,az-6);
+  cx.font='12px system-ui';cx.fillStyle='#8b949e';
+  for(let x=X0;x<=X1;x++) if(x%5===0) cx.fillText(x,OX+(x-X0)*CS+2,cv.height-4);
+  for(let z=Z0;z<=Z1;z++) if(z%5===0) cx.fillText(z,2,OY+(z-Z0)*CS+12);
+  document.getElementById('gy').textContent='Y='+y;
+}
+cv.addEventListener('mousemove',ev=>{
+  const r=cv.getBoundingClientRect(),sx=cv.width/r.width;
+  const x=Math.floor(((ev.clientX-r.left)*sx-OX)/CS)+X0, z=Math.floor(((ev.clientY-r.top)*sx-OY)/CS)+Z0;
+  const m=get(x,curY,z);
+  document.getElementById('hover').textContent=`X ${x} | Y ${curY} | Z ${z}  →  ${m?M[m].n:'Luft'}`;
+});
+
+/* ================= MODI ================= */
+const orbit=new OrbitControls(camera,renderer.domElement);
+orbit.target.set(6,10,0); orbit.enableDamping=true; orbit.update();
+const plc=new PointerLockControls(camera,document.body);
+let mode='over';
+const $=id=>document.getElementById(id);
+function setMode(m){
+  mode=m;
+  ['mOver','mLayer','mWalk'].forEach(id=>$(id).classList.remove('on'));
+  $({over:'mOver',layer:'mLayer',walk:'mWalk'}[m]).classList.add('on');
+  $('layerBox').classList.toggle('hide',m!=='layer');
+  $('right').classList.toggle('hide',m!=='layer');
+  $('cross').style.display=$('pos').style.display=m==='walk'?'block':'none';
+  orbit.enabled=m!=='walk';
+  if(m==='layer'){applyLayer();}
+  else{rebuild(99,false,false);matTable(null);}
+  if(m==='walk'){
+    player.set(1,-3.4,19.5); vel.set(0,0,0); camera.position.set(1,-3.4+1.62,19.5); camera.lookAt(1,0,0);
+    $('help').textContent='Klicken zum Starten · WASD laufen · Maus schauen · Leertaste springen · Shift sprinten · F Flugmodus (Leertaste/C hoch/runter) · ESC beenden';
+  } else {
+    plc.unlock();
+    $('help').textContent=m==='layer'?'Pfeil hoch/runter oder Slider: Schicht wechseln · Maus: Kamera drehen':'Maus links: drehen · rechts: verschieben · Rad: zoomen';
+    if(m==='over'){camera.position.set(-38,30,44);orbit.target.set(6,10,0);}
+  }
+}
+function applyLayer(){
+  curY=+$('ySlider').value;
+  $('ylabel').innerHTML=`Y = ${curY} <small>(Welt ≈ ${curY+67})</small>`;
+  $('note').textContent=note(curY);
+  rebuild(curY,true,$('onlyLayer').checked); matTable(curY); drawGrid(curY);
+  if(mode==='layer'){orbit.target.y=curY;}
+}
+$('mOver').onclick=()=>setMode('over');
+$('mLayer').onclick=()=>setMode('layer');
+$('mWalk').onclick=()=>setMode('walk');
+$('ySlider').oninput=applyLayer;
+$('onlyLayer').onchange=applyLayer;
+$('yUp').onclick=()=>{$('ySlider').value=+$('ySlider').value+1;applyLayer();};
+$('yDown').onclick=()=>{$('ySlider').value=+$('ySlider').value-1;applyLayer();};
+renderer.domElement.addEventListener('click',()=>{if(mode==='walk')plc.lock();});
+
+/* ================= BEGEHEN (Physik) ================= */
+const player=new THREE.Vector3(1,-3.4,19.5), vel=new THREE.Vector3();
+const keys={}; let fly=false, onGround=false;
+addEventListener('keydown',e=>{
+  keys[e.code]=true;
+  if(e.code==='KeyF'&&mode==='walk'){fly=!fly;vel.y=0;}
+  if(mode==='layer'&&(e.code==='ArrowUp'||e.code==='ArrowDown')){
+    $('ySlider').value=+$('ySlider').value+(e.code==='ArrowUp'?1:-1);applyLayer();e.preventDefault();}
+});
+addEventListener('keyup',e=>keys[e.code]=false);
+const R=v=>Math.floor(v+.5);
+const solidAt=(x,y,z)=>{const m=get(x,y,z);return m&&!M[m].walk;};
+function collides(p){
+  for(let x=R(p.x-.3);x<=R(p.x+.3);x++)for(let y=R(p.y+.01);y<=R(p.y+1.79);y++)for(let z=R(p.z-.3);z<=R(p.z+.3);z++)
+    if(solidAt(x,y,z)) return true;
+  return false;
+}
+function onLadder(p){for(let y=R(p.y+.1);y<=R(p.y+1.5);y++){if(get(R(p.x),y,R(p.z))==='ladder')return true;}return false;}
+function stepPhysics(dt){
+  const fwd=new THREE.Vector3();camera.getWorldDirection(fwd);fwd.y=0;fwd.normalize();
+  const right=new THREE.Vector3().crossVectors(fwd,new THREE.Vector3(0,1,0));
+  const wish=new THREE.Vector3();
+  if(keys.KeyW)wish.add(fwd);if(keys.KeyS)wish.sub(fwd);if(keys.KeyD)wish.add(right);if(keys.KeyA)wish.sub(right);
+  if(wish.lengthSq())wish.normalize().multiplyScalar(keys.ShiftLeft?(fly?14:6.5):(fly?8:4.3));
+  vel.x=wish.x;vel.z=wish.z;
+  const lad=onLadder(player);
+  if(fly){vel.y=(keys.Space?8:0)-(keys.KeyC?8:0);}
+  else if(lad){vel.y=keys.KeyW||keys.Space?3:(keys.ShiftLeft?-3:-1.2);}
+  else{vel.y-=28*dt; if(keys.Space&&onGround)vel.y=8.2;}
+  if(player.y<-3.45&&!fly){vel.y=Math.max(vel.y,-2); if(keys.Space)vel.y=3.5;}
+  for(const ax of ['x','z']){
+    const old=player[ax]; player[ax]+=vel[ax]*dt;
+    if(collides(player)){
+      const oy=player.y; player.y+=1.05;
+      if((onGround||lad)&&!collides(player)){}
+      else{player.y=oy;player[ax]=old;}
+    }
+  }
+  const oy=player.y; player.y+=vel.y*dt; onGround=false;
+  if(collides(player)){ if(vel.y<0){onGround=true; player.y=Math.ceil(oy-.5)+.5-1+1e-3; if(collides(player))player.y=oy;} else player.y=oy; vel.y=0; }
+  if(player.y<-12)player.set(1,-3.4,19.5);
+  camera.position.set(player.x,player.y+1.62,player.z);
+  $('pos').textContent=`X ${R(player.x)}  Y ${R(player.y)}  Z ${R(player.z)}${fly?'  ✈ Flug':''}`;
+}
+
+/* ================= LOOP ================= */
+const clock=new THREE.Clock();
+function loop(){
+  const dt=Math.min(clock.getDelta(),.05);
+  if(mode==='walk'){ if(plc.isLocked) stepPhysics(dt); }
+  else orbit.update();
+  beam.material.opacity=.35+.15*Math.sin(performance.now()/400);
+  renderer.render(scene,camera);
+  requestAnimationFrame(loop);
+}
+addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+setMode('over'); loop();
+</script>
+</body>
+</html>
